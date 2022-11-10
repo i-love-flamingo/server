@@ -115,6 +115,8 @@ func HttpServlet(addr string, mux http.Handler) Servlet {
 //   - /health/ready with either an OK response, or FAIL+412 once a the graceful shutdown is requested or the context was cancelled
 func HttpHealthcheckServlet(addr string) Servlet {
 	return func(ctx context.Context, gracefulStop <-chan struct{}) error {
+		slow.Add(1)
+
 		ready := make(chan struct{})
 		go func() {
 			slow.Wait()
@@ -164,6 +166,8 @@ func HttpHealthcheckServlet(addr string) Servlet {
 		log.Printf("[server] http healthcheck listening on %s", addr)
 
 		go func() { _ = server.ListenAndServe() }()
+
+		slow.Done()
 		<-gracefulStop
 		return errors.New("healthcheck switching to unready")
 	}
