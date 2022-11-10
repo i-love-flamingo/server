@@ -18,7 +18,7 @@ import (
 
 // Servlet is a function which is supposed to run forever and graceful stop once the gracefulStop channel is closed
 // any return (either error or no error) let's the server graceful stop all other servlets, and finally close
-type Servlet func(ctx context.Context, gracefulStop <-chan struct{}) error
+type Servlet func(ctx context.Context, ready chan<- struct{}, gracefulStop <-chan struct{}) error
 
 // Listener function return either a net.Listener or an error, for use with e.g. grpcServers
 type Listener func() (net.Listener, error)
@@ -32,9 +32,7 @@ func TcpListener(addr string) Listener {
 
 // GrpcServerServlet runs a grpc.Server instance with a given listener
 func GrpcServerServlet(listener Listener, server *grpc.Server) Servlet {
-	return func(ctx context.Context, gracefulStop <-chan struct{}) error {
-		slow.Add(1)
-
+	return func(ctx context.Context, ready chan<- struct{}, gracefulStop <-chan struct{}) error {
 		socket, err := listener()
 		if err != nil {
 			return fmt.Errorf("[server] unable to start grpc listener: %w", err)
@@ -54,7 +52,7 @@ func GrpcServerServlet(listener Listener, server *grpc.Server) Servlet {
 			server.Stop()
 		}()
 
-		slow.Done()
+		close(ready)
 
 		return server.Serve(socket)
 	}
@@ -62,23 +60,19 @@ func GrpcServerServlet(listener Listener, server *grpc.Server) Servlet {
 
 // GrpcServlet provides a setup grpc server for usage with grpc services
 func GrpcServlet(listener Listener, configure func(server *grpc.Server) error) Servlet {
-	return func(ctx context.Context, gracefulStop <-chan struct{}) error {
-		slow.Add(1)
-
+	return func(ctx context.Context, ready chan<- struct{}, gracefulStop <-chan struct{}) error {
 		server := grpc.NewServer()
 		if err := configure(server); err != nil {
 			return fmt.Errorf("unable to initialize grpc server: %w", err)
 		}
 
-		slow.Done()
-
-		return GrpcServerServlet(listener, server)(ctx, gracefulStop)
+		return GrpcServerServlet(listener, server)(ctx, ready, gracefulStop)
 	}
 }
 
 // HttpServerServlet provides a way to run an HTTP server as a servlet
 func HttpServerServlet(server *http.Server) Servlet {
-	return func(ctx context.Context, gracefulStop <-chan struct{}) error {
+	return func(ctx context.Context, ready chan<- struct{}, gracefulStop <-chan struct{}) error {
 		go func() {
 			<-gracefulStop
 			log.Printf("[server] http graceful stopping on %s", server.Addr)
@@ -93,6 +87,8 @@ func HttpServerServlet(server *http.Server) Servlet {
 
 		log.Printf("[server] http listening on %s", server.Addr)
 
+		close(ready)
+
 		return server.ListenAndServe()
 	}
 }
@@ -103,26 +99,20 @@ func HttpServlet(addr string, mux http.Handler) Servlet {
 		mux = http.DefaultServeMux
 	}
 
-	return func(ctx context.Context, gracefulStop <-chan struct{}) error {
+	return func(ctx context.Context, ready chan<- struct{}, gracefulStop <-chan struct{}) error {
 		server := &http.Server{Addr: addr, Handler: mux, BaseContext: func(l net.Listener) context.Context { return ctx }}
 
-		return HttpServerServlet(server)(ctx, gracefulStop)
+		return HttpServerServlet(server)(ctx, ready, gracefulStop)
 	}
 }
+
+var healthReady = make(chan struct{})
 
 // HttpHealthcheckServlet provides
 //   - /health/live with an OK response, or FAIL+412 if the context was cancelled
 //   - /health/ready with either an OK response, or FAIL+412 once a the graceful shutdown is requested or the context was cancelled
 func HttpHealthcheckServlet(addr string) Servlet {
-	return func(ctx context.Context, gracefulStop <-chan struct{}) error {
-		slow.Add(1)
-
-		ready := make(chan struct{})
-		go func() {
-			slow.Wait()
-			close(ready)
-		}()
-
+	return func(ctx context.Context, ready chan<- struct{}, gracefulStop <-chan struct{}) error {
 		mux := http.NewServeMux()
 		mux.HandleFunc("/health/live", func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
@@ -144,7 +134,7 @@ func HttpHealthcheckServlet(addr string) Servlet {
 			default:
 			}
 			select {
-			case <-ready:
+			case <-healthReady:
 				w.WriteHeader(http.StatusOK)
 				fmt.Fprintf(w, "OK")
 				return
@@ -167,20 +157,16 @@ func HttpHealthcheckServlet(addr string) Servlet {
 
 		go func() { _ = server.ListenAndServe() }()
 
-		slow.Done()
+		close(ready)
+
 		<-gracefulStop
 		return errors.New("healthcheck switching to unready")
 	}
 }
 
-var slow = new(sync.WaitGroup)
-
 func SlowServlet(initializer func() Servlet) Servlet {
-	return func(ctx context.Context, gracefulStop <-chan struct{}) error {
-		slow.Add(1)
-		servlet := initializer()
-		slow.Done()
-		return servlet(ctx, gracefulStop)
+	return func(ctx context.Context, ready chan<- struct{}, gracefulStop <-chan struct{}) error {
+		return initializer()(ctx, ready, gracefulStop)
 	}
 }
 
@@ -194,8 +180,6 @@ const timeout = 5 * time.Second
 // to gracefully shut down, and after a timeout force-stop all Servlets.
 // An interrupt/term signal during shutdown stops the whole server.
 func Run(ctx context.Context, servlets ...Servlet) {
-	slow.Add(1)
-
 	signalChannel := make(chan os.Signal, 2)
 	signal.Notify(signalChannel, os.Interrupt, syscall.SIGTERM)
 
@@ -214,16 +198,27 @@ func Run(ctx context.Context, servlets ...Servlet) {
 		running.Wait()
 		close(doneChannel)
 	}()
+
+	ready := new(sync.WaitGroup)
+	ready.Add(len(servlets))
+	go func() {
+		ready.Wait()
+		close(healthReady)
+	}()
+
 	for _, servlet := range servlets {
+		readyChannel := make(chan struct{})
+		go func() {
+			<-readyChannel
+			ready.Done()
+		}()
 		go func(servlet Servlet) {
-			if err := servlet(ctx, graceful); err != nil {
+			if err := servlet(ctx, readyChannel, graceful); err != nil {
 				errChannel <- fmt.Errorf("servlet error: %w", err)
 			}
 			running.Done()
 		}(servlet)
 	}
-
-	slow.Done()
 
 	// look for a reason to stop
 	select {
