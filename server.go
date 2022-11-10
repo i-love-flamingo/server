@@ -164,6 +164,9 @@ func HttpHealthcheckServlet(addr string) Servlet {
 	}
 }
 
+// SlowServlet calls the initializer, which in turn returns the actual servlet required to run the service.
+// This can be useful is initialization might need time, such as waiting for an external service to be available.
+// The healthcheck will report a non-ready status until all servlets are running.
 func SlowServlet(initializer func() Servlet) Servlet {
 	return func(ctx context.Context, ready chan<- struct{}, gracefulStop <-chan struct{}) error {
 		return initializer()(ctx, ready, gracefulStop)
