@@ -173,6 +173,53 @@ func SlowServlet(initializer func() Servlet) Servlet {
 	}
 }
 
+// ServletsServlet runs all provided servlets
+func ServletsServlet(servlets ...Servlet) Servlet {
+	return func(ctx context.Context, ready chan<- struct{}, upstreamGracefulStop <-chan struct{}) error {
+		servletsReady := new(sync.WaitGroup)
+		servletsReady.Add(len(servlets))
+		done := new(sync.WaitGroup)
+		done.Add(len(servlets))
+
+		go func() {
+			servletsReady.Wait()
+			close(ready)
+		}()
+
+		errChannel := make(chan error)
+		gracefulStop := make(chan struct{})
+
+		for _, servlet := range servlets {
+			servletReady := make(chan struct{})
+			go func() {
+				<-servletReady
+				servletsReady.Done()
+			}()
+			go func(servlet Servlet) {
+				errChannel <- servlet(ctx, servletReady, gracefulStop)
+				done.Done()
+			}(servlet)
+		}
+
+		var err error
+		select {
+		case err = <-errChannel:
+			log.Printf("[server] stopping: %s", err)
+		case <-upstreamGracefulStop:
+			log.Printf("[server] stopping graceful")
+		}
+		close(gracefulStop)
+
+		go func() {
+			for err := range errChannel {
+				log.Printf("[server] stopping: %s", err)
+			}
+		}()
+		done.Wait()
+		return err
+	}
+}
+
 const timeout = 5 * time.Second
 
 // Run runs a all provided servlets, until either
@@ -193,35 +240,11 @@ func Run(ctx context.Context, servlets ...Servlet) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// start all servlets
-	running := new(sync.WaitGroup)
-	running.Add(len(servlets))
-	// wait for running to be done
+	rootServlet := ServletsServlet(servlets...)
 	go func() {
-		running.Wait()
+		errChannel <- rootServlet(ctx, healthReady, graceful)
 		close(doneChannel)
 	}()
-
-	ready := new(sync.WaitGroup)
-	ready.Add(len(servlets))
-	go func() {
-		ready.Wait()
-		close(healthReady)
-	}()
-
-	for _, servlet := range servlets {
-		readyChannel := make(chan struct{})
-		go func() {
-			<-readyChannel
-			ready.Done()
-		}()
-		go func(servlet Servlet) {
-			if err := servlet(ctx, readyChannel, graceful); err != nil {
-				errChannel <- fmt.Errorf("servlet error: %w", err)
-			}
-			running.Done()
-		}(servlet)
-	}
 
 	// look for a reason to stop
 	select {
