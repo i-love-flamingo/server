@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/grpc"
 )
 
@@ -144,6 +145,8 @@ func HttpHealthcheckServlet(addr string) Servlet {
 				return
 			}
 		})
+
+		mux.Handle("/metrics", promhttp.Handler())
 
 		server := &http.Server{Addr: addr, Handler: mux}
 
