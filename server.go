@@ -14,8 +14,22 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/contrib/instrumentation/host"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/contrib/instrumentation/runtime"
+	"go.opentelemetry.io/contrib/propagators/b3"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/jaeger"
+	"go.opentelemetry.io/otel/exporters/prometheus"
+	"go.opentelemetry.io/otel/metric/global"
+	"go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/resource"
+	tracesdk "go.opentelemetry.io/otel/sdk/trace"
 	"google.golang.org/grpc"
 )
+
+var otelEnabled = false
 
 // Servlet is a function which is supposed to run forever and graceful stop once the gracefulStop channel is closed
 // any return (either error or no error) let's the server graceful stop all other servlets, and finally close
@@ -62,7 +76,11 @@ func GrpcServerServlet(listener Listener, server *grpc.Server) Servlet {
 // GrpcServlet provides a setup grpc server for usage with grpc services
 func GrpcServlet(listener Listener, configure func(server *grpc.Server) error) Servlet {
 	return func(ctx context.Context, ready chan<- struct{}, gracefulStop <-chan struct{}) error {
-		server := grpc.NewServer()
+		var opts []grpc.ServerOption
+		if otelEnabled {
+			opts = append(opts, grpc.UnaryInterceptor(otelgrpc.UnaryServerInterceptor()), grpc.StreamInterceptor(otelgrpc.StreamServerInterceptor()))
+		}
+		server := grpc.NewServer(opts...)
 		if err := configure(server); err != nil {
 			return fmt.Errorf("unable to initialize grpc server: %w", err)
 		}
@@ -98,6 +116,10 @@ func HttpServerServlet(server *http.Server) Servlet {
 func HttpServlet(addr string, mux http.Handler) Servlet {
 	if mux == nil {
 		mux = http.DefaultServeMux
+	}
+
+	if otelEnabled {
+		mux = otelhttp.NewHandler(mux, "flamingo.me/server/"+addr)
 	}
 
 	return func(ctx context.Context, ready chan<- struct{}, gracefulStop <-chan struct{}) error {
@@ -224,6 +246,44 @@ func ServletsServlet(servlets ...Servlet) Servlet {
 }
 
 const timeout = 5 * time.Second
+
+func RunWithOpentelemetry(ctx context.Context, resource *resource.Resource, jaegerEndpoint string, servlets ...Servlet) {
+	otelEnabled = true
+
+	opts := []tracesdk.TracerProviderOption{
+		tracesdk.WithResource(resource),
+	}
+	// otel.SetTracerProvider(trace.NewTracerProvider(trace.WithSpanProcessor(trace.NewBatchSpanProcessor(exp))))
+	if jaegerEndpoint != "" {
+		exp, err := jaeger.New(jaeger.WithCollectorEndpoint(jaeger.WithEndpoint(jaegerEndpoint)))
+		if err != nil {
+			log.Fatal(err)
+		}
+		opts = append(opts, tracesdk.WithBatcher(exp))
+	}
+
+	tp := tracesdk.NewTracerProvider(opts...)
+
+	otel.SetTracerProvider(tp)
+
+	exporter, err := prometheus.New()
+	if err != nil {
+		log.Fatal(err)
+	}
+	global.SetMeterProvider(metric.NewMeterProvider(metric.WithReader(exporter), metric.WithResource(resource)))
+
+	if err = host.Start(); err != nil {
+		log.Fatal(err)
+	}
+
+	if err = runtime.Start(); err != nil {
+		log.Fatal(err)
+	}
+
+	otel.SetTextMapPropagator(b3.New())
+
+	Run(ctx, servlets...)
+}
 
 // Run runs a all provided servlets, until either
 // - the incoming context is cancelled
