@@ -282,6 +282,8 @@ func RunWithOpentelemetry(ctx context.Context, resource *resource.Resource, jaeg
 
 	otel.SetTextMapPropagator(b3.New())
 
+	http.DefaultTransport = otelhttp.NewTransport(http.DefaultTransport)
+
 	Run(ctx, servlets...)
 }
 
