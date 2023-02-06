@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"net/http"
+	"testing"
 	"time"
 
 	"flamingo.me/server"
@@ -32,4 +33,14 @@ func ExampleRun() {
 		}),
 		server.HttpHealthcheckServlet(":18080"),
 	)
+}
+
+func TestServletsServlet(t *testing.T) {
+	servlet := server.ServletsServlet(func(ctx context.Context, ready chan<- struct{}, gracefulStop <-chan struct{}, errorsC chan<- error) error {
+		return nil
+	})
+	err := servlet(context.Background(), make(chan struct{}), make(chan struct{}), make(chan error))
+	if err == nil {
+		t.Error("servlet ended but did not return an error")
+	}
 }

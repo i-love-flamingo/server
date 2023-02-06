@@ -198,6 +198,8 @@ func SlowServlet(initializer func() Servlet) Servlet {
 	}
 }
 
+var errServletStopped = errors.New("Servlet stopped")
+
 // ServletsServlet runs all provided servlets
 func ServletsServlet(servlets ...Servlet) Servlet {
 	return func(ctx context.Context, ready chan<- struct{}, upstreamGracefulStop <-chan struct{}, errorsC chan<- error) error {
@@ -223,6 +225,8 @@ func ServletsServlet(servlets ...Servlet) Servlet {
 			go func(servlet Servlet) {
 				if err := servlet(ctx, servletReady, gracefulStop, errorsC); err != nil {
 					errChannel <- err
+				} else {
+					errChannel <- errServletStopped
 				}
 				done.Done()
 			}(servlet)
