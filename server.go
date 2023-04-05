@@ -27,6 +27,8 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	tracesdk "go.opentelemetry.io/otel/sdk/trace"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 var otelEnabled = false
@@ -78,14 +80,28 @@ func GrpcServletErrorLoggingServerOptions() []grpc.ServerOption {
 		grpc.ChainUnaryInterceptor(func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
 			resp, err = handler(ctx, req)
 			if err != nil {
-				log.Printf("gRPC call error on %q: %s", info.FullMethod, err.Error())
+				s := status.New(codes.Unknown, "-")
+				var grpcError interface {
+					GRPCStatus() *status.Status
+				}
+				if errors.As(err, &grpcError) {
+					s = grpcError.GRPCStatus()
+				}
+				log.Printf("gRPC call error on %q: %s (%d: %s): %s", info.FullMethod, s.Message(), s.Code(), s.Code(), err.Error())
 			}
 			return resp, err
 		}),
 		grpc.ChainStreamInterceptor(func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 			err := handler(srv, ss)
 			if err != nil {
-				log.Printf("gRPC stream error on %q: %s", info.FullMethod, err.Error())
+				s := status.New(codes.Unknown, "-")
+				var grpcError interface {
+					GRPCStatus() *status.Status
+				}
+				if errors.As(err, &grpcError) {
+					s = grpcError.GRPCStatus()
+				}
+				log.Printf("gRPC stream error on %q: %s (%d: %s): %s", info.FullMethod, s.Message(), s.Code(), s.Code(), err.Error())
 			}
 			return err
 		}),
