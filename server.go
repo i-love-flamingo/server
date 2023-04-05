@@ -73,12 +73,34 @@ func GrpcServerServlet(listener Listener, server *grpc.Server) Servlet {
 	}
 }
 
+func GrpcServletErrorLoggingServerOptions() []grpc.ServerOption {
+	return []grpc.ServerOption{
+		grpc.ChainUnaryInterceptor(func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
+			resp, err = handler(ctx, req)
+			if err != nil {
+				log.Printf("gRPC call error on %q: %s", info.FullMethod, err.Error())
+			}
+			return resp, err
+		}),
+		grpc.ChainStreamInterceptor(func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+			err := handler(srv, ss)
+			if err != nil {
+				log.Printf("gRPC stream error on %q: %s", info.FullMethod, err.Error())
+			}
+			return err
+		}),
+	}
+}
+
 // GrpcServlet provides a setup grpc server for usage with grpc services
-func GrpcServlet(listener Listener, configure func(server *grpc.Server) error) Servlet {
+func GrpcServlet(listener Listener, configure func(server *grpc.Server) error, opts func() []grpc.ServerOption) Servlet {
 	return func(ctx context.Context, ready chan<- struct{}, gracefulStop <-chan struct{}, errorsC chan<- error) error {
-		var opts []grpc.ServerOption
+		if opts == nil {
+			opts = func() []grpc.ServerOption { return nil }
+		}
+		opts := opts()
 		if otelEnabled {
-			opts = append(opts, grpc.UnaryInterceptor(otelgrpc.UnaryServerInterceptor()), grpc.StreamInterceptor(otelgrpc.StreamServerInterceptor()))
+			opts = append(opts, grpc.ChainUnaryInterceptor(otelgrpc.UnaryServerInterceptor()), grpc.ChainStreamInterceptor(otelgrpc.StreamServerInterceptor()))
 		}
 		server := grpc.NewServer(opts...)
 		if err := configure(server); err != nil {

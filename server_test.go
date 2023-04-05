@@ -20,7 +20,7 @@ func ExampleRun() {
 		ctx,
 		server.GrpcServlet(server.TcpListener(":50051"), func(server *grpc.Server) error {
 			return nil
-		}),
+		}, nil),
 		server.HttpServlet(":8080", nil),
 		server.SlowServlet(func() server.Servlet {
 			mux := http.NewServeMux()
