@@ -22,7 +22,6 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/jaeger"
 	"go.opentelemetry.io/otel/exporters/prometheus"
-	"go.opentelemetry.io/otel/metric/global"
 	"go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	tracesdk "go.opentelemetry.io/otel/sdk/trace"
@@ -314,7 +313,8 @@ func RunWithOpentelemetry(ctx context.Context, resource *resource.Resource, jaeg
 	if err != nil {
 		log.Fatal(err)
 	}
-	global.SetMeterProvider(metric.NewMeterProvider(metric.WithReader(exporter), metric.WithResource(resource)))
+
+	otel.SetMeterProvider(metric.NewMeterProvider(metric.WithReader(exporter), metric.WithResource(resource)))
 
 	if err = host.Start(); err != nil {
 		log.Fatal(err)
