@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -30,7 +30,9 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-var otelEnabled = false
+var (
+	otelEnabled = false
+)
 
 // Servlet is a function which is supposed to run forever and graceful stop once the gracefulStop channel is closed
 // any return (either error or no error) let's the server graceful stop all other servlets, and finally close
@@ -51,20 +53,20 @@ func GrpcServerServlet(listener Listener, server *grpc.Server) Servlet {
 	return func(ctx context.Context, ready chan<- struct{}, gracefulStop <-chan struct{}, errorsC chan<- error) error {
 		socket, err := listener()
 		if err != nil {
-			return fmt.Errorf("[server] unable to start grpc listener: %w", err)
+			return fmt.Errorf("unable to start grpc listener: %w", err)
 		}
 
-		log.Printf("[server] grpc listening on %s", socket.Addr().String())
+		slog.With("area", "server").Info("grpc listening", "addr", socket.Addr().String())
 
 		go func() {
 			<-gracefulStop
-			log.Printf("[server] grpc graceful stopping on %s", socket.Addr().String())
+			slog.With("area", "server").Info("grpc graceful stopping", "addr", socket.Addr().String())
 			server.GracefulStop()
 		}()
 
 		go func() {
 			<-ctx.Done()
-			log.Printf("[server] grpc cancelling on %s", socket.Addr().String())
+			slog.With("area", "server").Info("grpc server cancelled", "addr", socket.Addr().String())
 			server.Stop()
 		}()
 
@@ -86,7 +88,7 @@ func GrpcServletErrorLoggingServerOptions() []grpc.ServerOption {
 				if errors.As(err, &grpcError) {
 					s = grpcError.GRPCStatus()
 				}
-				log.Printf("gRPC call error on %q: %s (%d: %s): %s", info.FullMethod, s.Message(), s.Code(), s.Code(), err.Error())
+				slog.With("area", "server").WarnContext(ctx, "gRPC call error", "method", info.FullMethod, "message", s.Message(), "code", s.Code(), "error", err)
 			}
 			return resp, err
 		}),
@@ -100,7 +102,7 @@ func GrpcServletErrorLoggingServerOptions() []grpc.ServerOption {
 				if errors.As(err, &grpcError) {
 					s = grpcError.GRPCStatus()
 				}
-				log.Printf("gRPC stream error on %q: %s (%d: %s): %s", info.FullMethod, s.Message(), s.Code(), s.Code(), err.Error())
+				slog.With("area", "server").WarnContext(ss.Context(), "gRPC stream error", "method", info.FullMethod, "message", s.Message(), "code", s.Code(), "error", err)
 			}
 			return err
 		}),
@@ -131,17 +133,17 @@ func HttpServerServlet(server *http.Server) Servlet {
 	return func(ctx context.Context, ready chan<- struct{}, gracefulStop <-chan struct{}, errorsC chan<- error) error {
 		go func() {
 			<-gracefulStop
-			log.Printf("[server] http graceful stopping on %s", server.Addr)
+			slog.With("area", "server").Info("http graceful stopping", "addr", server.Addr)
 			_ = server.Shutdown(ctx)
 		}()
 
 		go func() {
 			<-ctx.Done()
-			log.Printf("[server] http cancelling on %s", server.Addr)
+			slog.With("area", "server").Info("http cancelling", "addr", server.Addr)
 			server.Close()
 		}()
 
-		log.Printf("[server] http listening on %s", server.Addr)
+		slog.With("area", "server").Info("http listening", "addr", server.Addr)
 
 		close(ready)
 
@@ -211,11 +213,11 @@ func HttpHealthcheckServlet(addr string) Servlet {
 
 		go func() {
 			<-ctx.Done()
-			log.Printf("[server] http healthcheck cancelling on %s", addr)
+			slog.With("area", "server").Info("http healthcheck cancelling", "addr", addr)
 			_ = server.Shutdown(ctx)
 		}()
 
-		log.Printf("[server] http healthcheck listening on %s", addr)
+		slog.With("area", "server").Info("http healthcheck listening", "addr", addr)
 
 		go func() { _ = server.ListenAndServe() }()
 
@@ -272,15 +274,15 @@ func ServletsServlet(servlets ...Servlet) Servlet {
 		var err error
 		select {
 		case err = <-errChannel:
-			log.Printf("[server] stopping: %s", err)
+			slog.With("area", "server").Info("stopping", "error", err)
 		case <-upstreamGracefulStop:
-			log.Printf("[server] stopping graceful")
+			slog.With("area", "server").Info("stopping graceful")
 		}
 		close(gracefulStop)
 
 		go func() {
 			for err := range errChannel {
-				log.Printf("[server] stopping: %s", err)
+				slog.With("area", "server").Info("stopping", "error", err)
 			}
 		}()
 		done.Wait()
@@ -296,11 +298,12 @@ func RunWithOpentelemetry(ctx context.Context, resource *resource.Resource, jaeg
 	opts := []tracesdk.TracerProviderOption{
 		tracesdk.WithResource(resource),
 	}
-	// otel.SetTracerProvider(trace.NewTracerProvider(trace.WithSpanProcessor(trace.NewBatchSpanProcessor(exp))))
+
 	if jaegerEndpoint != "" {
 		exp, err := jaeger.New(jaeger.WithCollectorEndpoint(jaeger.WithEndpoint(jaegerEndpoint)))
 		if err != nil {
-			log.Fatal(err)
+			slog.With("area", "server").Error(err.Error())
+			os.Exit(1)
 		}
 		opts = append(opts, tracesdk.WithBatcher(exp))
 	}
@@ -311,17 +314,20 @@ func RunWithOpentelemetry(ctx context.Context, resource *resource.Resource, jaeg
 
 	exporter, err := prometheus.New()
 	if err != nil {
-		log.Fatal(err)
+		slog.With("area", "server").Error(err.Error())
+		os.Exit(1)
 	}
 
 	otel.SetMeterProvider(metric.NewMeterProvider(metric.WithReader(exporter), metric.WithResource(resource)))
 
 	if err = host.Start(); err != nil {
-		log.Fatal(err)
+		slog.With("area", "server").Error(err.Error())
+		os.Exit(1)
 	}
 
 	if err = runtime.Start(); err != nil {
-		log.Fatal(err)
+		slog.With("area", "server").Error(err.Error())
+		os.Exit(1)
 	}
 
 	otel.SetTextMapPropagator(b3.New())
@@ -358,17 +364,17 @@ func Run(ctx context.Context, servlets ...Servlet) {
 	// look for a reason to stop
 	select {
 	case signal := <-signalChannel:
-		log.Printf("[server] caught signal %s, stopping servlets...", signal)
+		slog.With("area", "server").WarnContext(ctx, "caught signal, stopping servlets...", "signal", signal)
 	case <-ctx.Done():
-		log.Printf("[server] context cancelled: %s, stopping servlets...", ctx.Err())
+		slog.With("area", "server").WarnContext(ctx, "context cancelled, stopping servlets...", "error", ctx.Err())
 	case err := <-errChannel:
-		log.Printf("[server] got error: %s, stopping servlets...", err)
+		slog.With("area", "server").WarnContext(ctx, "got error, stopping servlets...", "error", err)
 	}
 
 	// drain incoming servlet errors
 	go func() {
 		for err := range errChannel {
-			log.Printf("[server] stopping: %s", err)
+			slog.With("area", "server").Info("stopping", "error", err)
 		}
 	}()
 
@@ -378,16 +384,16 @@ func Run(ctx context.Context, servlets ...Servlet) {
 	// catch interruption of graceful shutdown
 	go func() {
 		signal := <-signalChannel
-		log.Printf("[server] caught signal %s, exiting", signal)
+		slog.With("area", "server").Info("caught signal, exiting", "signal", signal)
 		os.Exit(1)
 	}()
 
 	// wait or timeout if servlets don't exit
 	select {
 	case <-time.After(timeout):
-		log.Printf("[server] timeout waiting for graceful stopping, cancelling")
+		slog.With("area", "server").Warn("timeout waiting for graceful stopping, cancelling")
 	case <-doneChannel:
-		log.Printf("[server] all servlets stopped")
+		slog.With("area", "server").Info("all servlets stopped")
 		os.Exit(0)
 	}
 
