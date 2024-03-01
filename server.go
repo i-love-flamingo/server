@@ -88,7 +88,7 @@ func GrpcServletErrorLoggingServerOptions() []grpc.ServerOption {
 				if errors.As(err, &grpcError) {
 					s = grpcError.GRPCStatus()
 				}
-				slog.With("area", "server").WarnContext(ctx, "gRPC call error", "method", info.FullMethod, "message", s.Message(), "code", s.Code(), "error", err)
+				slog.With("area", "server").InfoContext(ctx, "gRPC call error", "method", info.FullMethod, "message", s.Message(), "code", s.Code(), "error", err)
 			}
 			return resp, err
 		}),
@@ -102,7 +102,7 @@ func GrpcServletErrorLoggingServerOptions() []grpc.ServerOption {
 				if errors.As(err, &grpcError) {
 					s = grpcError.GRPCStatus()
 				}
-				slog.With("area", "server").WarnContext(ss.Context(), "gRPC stream error", "method", info.FullMethod, "message", s.Message(), "code", s.Code(), "error", err)
+				slog.With("area", "server").InfoContext(ss.Context(), "gRPC stream error", "method", info.FullMethod, "message", s.Message(), "code", s.Code(), "error", err)
 			}
 			return err
 		}),
@@ -117,7 +117,7 @@ func GrpcServlet(listener Listener, configure func(server *grpc.Server) error, o
 		}
 		opts := opts()
 		if otelEnabled {
-			opts = append(opts, grpc.ChainUnaryInterceptor(otelgrpc.UnaryServerInterceptor()), grpc.ChainStreamInterceptor(otelgrpc.StreamServerInterceptor()))
+			opts = append([]grpc.ServerOption{grpc.ChainUnaryInterceptor(otelgrpc.UnaryServerInterceptor()), grpc.ChainStreamInterceptor(otelgrpc.StreamServerInterceptor())}, opts...)
 		}
 		server := grpc.NewServer(opts...)
 		if err := configure(server); err != nil {
