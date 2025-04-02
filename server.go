@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	prometheusClient "github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/contrib/instrumentation/host"
@@ -292,6 +293,18 @@ func ServletsServlet(servlets ...Servlet) Servlet {
 
 const timeout = 5 * time.Second
 
+var unixTimeMetric = prometheusClient.NewDesc("go_time_unixtime", "Current Unix Time in Seconds", nil, nil)
+
+type unixTimeCollector struct{}
+
+func (*unixTimeCollector) Describe(desc chan<- *prometheusClient.Desc) {
+	desc <- unixTimeMetric
+}
+
+func (*unixTimeCollector) Collect(metric chan<- prometheusClient.Metric) {
+	metric <- prometheusClient.MustNewConstMetric(unixTimeMetric, prometheusClient.CounterValue, float64(time.Now().Unix()))
+}
+
 func RunWithOpentelemetry(ctx context.Context, resource *resource.Resource, jaegerEndpoint string, servlets ...Servlet) {
 	otelEnabled = true
 
@@ -312,6 +325,10 @@ func RunWithOpentelemetry(ctx context.Context, resource *resource.Resource, jaeg
 
 	otel.SetTracerProvider(tp)
 
+	if err := prometheusClient.DefaultRegisterer.Register(new(unixTimeCollector)); err != nil {
+		slog.With("area", "server").Error(err.Error())
+		os.Exit(1)
+	}
 	exporter, err := prometheus.New()
 	if err != nil {
 		slog.With("area", "server").Error(err.Error())
