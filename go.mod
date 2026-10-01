@@ -1,8 +1,6 @@
 module flamingo.me/server
 
-go 1.22.7
-
-toolchain go1.23.3
+go 1.26.0
 
 require (
 	github.com/prometheus/client_golang v1.20.5
